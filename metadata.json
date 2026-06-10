@@ -1,0 +1,6 @@
+{
+  "name": "JavaScript Code Editor",
+  "description": "Un editor de código especializado para JavaScript con resaltado de sintaxis, autocompletado, formateador Prettier y arquitectura de plugins estilo VS Code.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

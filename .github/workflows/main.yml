@@ -36,6 +36,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
+          validate-wrappers: false
 
       - name: Build Debug and Release APKs
         run: gradle assembleDebug assembleRelease --stacktrace

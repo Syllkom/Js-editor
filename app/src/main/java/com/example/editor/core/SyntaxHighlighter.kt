@@ -1,5 +1,6 @@
 package com.example.editor.core
 
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -8,6 +9,7 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 
 enum class TokenType {
     COMMENT,
@@ -20,10 +22,11 @@ enum class TokenType {
     CLASS_NAME,       // PascalCase class declarations
     OPERATOR,         // +, -, *, /, =, &&, || etc.
     IDENTIFIER,       // normal variables
+    HEX_COLOR,        // #FFFFFF, #FFF etc.
     TEXT
 }
 
-data class Token(val type: TokenType, val range: IntRange)
+data class Token(val type: TokenType, val range: IntRange, val originalString: String? = null)
 
 class JsThemeColors(
     val comment: Color,
@@ -72,7 +75,9 @@ class JsThemeColors(
     }
 }
 
-class JsSyntaxHighlighter(val isDark: Boolean) : VisualTransformation {
+class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnostic> = emptyList()) : VisualTransformation {
+    
+    var cursorPosition: Int = -1
     
     val colors = if (isDark) JsThemeColors.VSCODE_DARK else JsThemeColors.VSCODE_LIGHT
 
@@ -98,11 +103,161 @@ class JsSyntaxHighlighter(val isDark: Boolean) : VisualTransformation {
                 TokenType.CLASS_NAME -> SpanStyle(color = colors.className, fontWeight = FontWeight.SemiBold)
                 TokenType.OPERATOR -> SpanStyle(color = colors.operator)
                 TokenType.IDENTIFIER -> SpanStyle(color = colors.identifier)
+                TokenType.HEX_COLOR -> {
+                    val hexColorString = token.originalString ?: "#000000"
+                    val parsedColor = try {
+                        Color(android.graphics.Color.parseColor(hexColorString))
+                    } catch (e: Exception) {
+                        colors.string // fallback
+                    }
+                    SpanStyle(
+                        color = if (parsedColor.luminance() > 0.5f) Color.Black else Color.White,
+                        background = parsedColor
+                    )
+                }
                 TokenType.TEXT -> SpanStyle(color = colors.text)
             }
             builder.addStyle(style, token.range.start, token.range.endInclusive + 1)
         }
-        
+
+        // Apply Diagnostics squiggly lines
+        if (diagnostics.isNotEmpty()) {
+            val lines = text.split("\n")
+            var currentIndex = 0
+            for ((i, lineStr) in lines.withIndex()) {
+                val line1Idx = i + 1
+                val lineDiags = diagnostics.filter { it.line == line1Idx }
+                for (diag in lineDiags) {
+                    val errorColor = if (diag.level == DiagnosticLevel.ERROR) Color(0xFFFF5555) else Color(0xFFFFAA00)
+                    
+                    // Simple full-line underline if term is empty or not found, else find term
+                    var startOffset = currentIndex
+                    var endOffset = currentIndex + lineStr.length
+                    
+                    if (diag.term.isNotEmpty()) {
+                        val termIdx = lineStr.indexOf(diag.term)
+                        if (termIdx != -1) {
+                            startOffset = currentIndex + termIdx
+                            endOffset = startOffset + diag.term.length
+                        }
+                    }
+
+                    builder.addStyle(
+                        SpanStyle(textDecoration = TextDecoration.Underline, color = errorColor),
+                        startOffset,
+                        endOffset
+                    )
+                }
+                currentIndex += lineStr.length + 1 // +1 for '\n'
+            }
+        }
+
+        // Apply Hex and RGB Color Highlight
+        val rxColor = "(#[0-9a-fA-F]{3,8})|(rgba?\\([\\d\\s,]+\\))".toRegex(RegexOption.IGNORE_CASE)
+        rxColor.findAll(text).forEach { match ->
+            val colorStr = match.value.replace(" ", "")
+            val parsedColor = try {
+                if (colorStr.startsWith("#")) {
+                    Color(android.graphics.Color.parseColor(colorStr))
+                } else if (colorStr.startsWith("rgb")) {
+                    val numbers = colorStr.substringAfter("(").substringBefore(")").split(",")
+                    val r = numbers.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 255) ?: 0
+                    val g = numbers.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 255) ?: 0
+                    val b = numbers.getOrNull(2)?.toIntOrNull()?.coerceIn(0, 255) ?: 0
+                    val a = if (colorStr.startsWith("rgba")) {
+                        val alphaFloat = numbers.getOrNull(3)?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 1f
+                        (alphaFloat * 255).toInt()
+                    } else 255
+                    Color(android.graphics.Color.argb(a, r, g, b))
+                } else null
+            } catch (e: Exception) { null }
+
+            if (parsedColor != null) {
+                builder.addStyle(
+                    SpanStyle(
+                        color = if (parsedColor.luminance() > 0.5f) Color.Black else Color.White,
+                        background = parsedColor
+                    ),
+                    match.range.start,
+                    match.range.endInclusive + 1
+                )
+            }
+        }
+
+        // Bracket matching
+        if (cursorPosition >= 0 && cursorPosition <= text.length) {
+            val bracketStyle = SpanStyle(
+                background = if (isDark) Color(0xFF444444) else Color(0xFFDDDDDD),
+                fontWeight = FontWeight.Bold
+            )
+            
+            fun getBracketAt(pos: Int): Char? {
+                if (pos < 0 || pos >= text.length) return null
+                val c = text[pos]
+                if ("(){}[]".contains(c)) {
+                    val matchIndex = tokens.binarySearch { token ->
+                        if (token.range.last < pos) -1
+                        else if (token.range.first > pos) 1
+                        else 0
+                    }
+                    if (matchIndex >= 0 && tokens[matchIndex].type == TokenType.OPERATOR) return c
+                }
+                return null
+            }
+
+            var startHighlight = -1
+            var endHighlight = -1
+
+            val pairs = mapOf('(' to ')', '{' to '}', '[' to ']', ')' to '(', '}' to '{', ']' to '[')
+            
+            var matchTargetPos = -1
+            var matchChar: Char? = null
+
+            // Check right of cursor
+            val rightChar = getBracketAt(cursorPosition)
+            if (rightChar != null) {
+                matchTargetPos = cursorPosition
+                matchChar = rightChar
+            } else if (cursorPosition > 0) {
+                // Check left of cursor
+                val leftChar = getBracketAt(cursorPosition - 1)
+                if (leftChar != null) {
+                    matchTargetPos = cursorPosition - 1
+                    matchChar = leftChar
+                }
+            }
+
+            if (matchChar != null && matchTargetPos != -1) {
+                val target = pairs[matchChar]!!
+                val isForward = matchChar in listOf('(', '{', '[')
+                val step = if (isForward) 1 else -1
+                var curr = matchTargetPos + step
+                var count = 1
+                
+                while (curr >= 0 && curr < text.length) {
+                    val c = getBracketAt(curr)
+                    if (c != null) {
+                        if (c == matchChar) {
+                            count++
+                        } else if (c == target) {
+                            count--
+                            if (count == 0) {
+                                startHighlight = matchTargetPos
+                                endHighlight = curr
+                                break
+                            }
+                        }
+                    }
+                    curr += step
+                }
+            }
+
+            if (startHighlight != -1 && endHighlight != -1) {
+                builder.addStyle(bracketStyle, startHighlight, startHighlight + 1)
+                builder.addStyle(bracketStyle, endHighlight, endHighlight + 1)
+            }
+        }
+
         return builder.toAnnotatedString()
     }
 

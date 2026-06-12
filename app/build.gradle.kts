@@ -23,10 +23,13 @@ android {
   signingConfigs {
     create("release") {
       val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
+      val keystoreFile = file(keystorePath)
+      if (keystoreFile.exists()) {
+        storeFile = keystoreFile
+        storePassword = System.getenv("STORE_PASSWORD")
+        keyAlias = "upload"
+        keyPassword = System.getenv("KEY_PASSWORD")
+      }
     }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
@@ -41,7 +44,12 @@ android {
       isCrunchPngs = false
       isMinifyEnabled = false
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-      signingConfig = signingConfigs.getByName("release")
+      val releaseSigning = signingConfigs.findByName("release")
+      if (releaseSigning != null && releaseSigning.storeFile?.exists() == true) {
+        signingConfig = releaseSigning
+      } else {
+        signingConfig = null
+      }
     }
     debug {
       signingConfig = signingConfigs.getByName("debugConfig")
@@ -65,30 +73,12 @@ secrets {
   defaultPropertiesFileName = ".env.example"
 }
 
-tasks.register<Zip>("zipProject") {
-    archiveFileName.set("proyecto_completo.zip")
-    destinationDirectory.set(rootDir)
-    
-    from(rootDir) {
-        val rootDirName = rootDir.name
-        exclude("**/build/**")
-        exclude("**/.gradle/**")
-        exclude("**/.build-outputs/**")
-        exclude("**/local.properties")
-        exclude("**/*.jks")
-        exclude("**/debug.keystore")
-        exclude("**/*.zip")
-        exclude("**/.git/**")
-    }
-}
 
-tasks.named("preBuild") {
-    dependsOn("zipProject")
-}
 
 // Some unused dependencies are commented out below instead of being removed.
 // This makes it easy to add them back in the future if needed.
 dependencies {
+  implementation("androidx.documentfile:documentfile:1.0.1")
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
   // implementation(libs.accompanist.permissions)

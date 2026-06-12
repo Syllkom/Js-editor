@@ -14,7 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
-class EditorViewModel(private val repository: FileRepository) : ViewModel() {
+class EditorViewModel(private val repository: FileRepository, private val context: Context) : ViewModel() {
 
     // Files state
     val files: StateFlow<List<VirtualFile>> = repository.allFiles
@@ -72,7 +72,7 @@ class EditorViewModel(private val repository: FileRepository) : ViewModel() {
     val isSearchOpen: StateFlow<Boolean> = _isSearchOpen.asStateFlow()
 
     // UI Panel controller
-    private val _isSidebarOpen = MutableStateFlow(true)
+    private val _isSidebarOpen = MutableStateFlow(false)
     val isSidebarOpen: StateFlow<Boolean> = _isSidebarOpen.asStateFlow()
 
     // "explorer", "plugins", "outline", "settings"
@@ -84,6 +84,15 @@ class EditorViewModel(private val repository: FileRepository) : ViewModel() {
 
     private val _isMinimapOpen = MutableStateFlow(true)
     val isMinimapOpen: StateFlow<Boolean> = _isMinimapOpen.asStateFlow()
+
+    private val _isMinimapTextVisible = MutableStateFlow(false)
+    val isMinimapTextVisible: StateFlow<Boolean> = _isMinimapTextVisible.asStateFlow()
+
+    private val _isIndentGuidesEnabled = MutableStateFlow(true)
+    val isIndentGuidesEnabled: StateFlow<Boolean> = _isIndentGuidesEnabled.asStateFlow()
+
+    private val _editorFontSize = MutableStateFlow(14f)
+    val editorFontSize: StateFlow<Float> = _editorFontSize.asStateFlow()
 
     // Enabled plugins observer
     val enabledPluginIds: StateFlow<Set<String>> = PluginManager.enabledPluginIds
@@ -100,6 +109,73 @@ class EditorViewModel(private val repository: FileRepository) : ViewModel() {
                     val appJs = activeFileList.find { it.name == "app.js" } ?: activeFileList.first()
                     openFileInTab(appJs)
                 }
+            }
+        }
+    }
+
+    // Directory SAF state
+    private val _safTreeUri = MutableStateFlow<String?>(null)
+    val safTreeUri: StateFlow<String?> = _safTreeUri.asStateFlow()
+    
+    private val _safTreeName = MutableStateFlow<String?>(null)
+    val safTreeName: StateFlow<String?> = _safTreeName.asStateFlow()
+
+    private val _safFiles = MutableStateFlow<List<com.example.data.WorkspaceFile>>(emptyList())
+    val safFiles: StateFlow<List<com.example.data.WorkspaceFile>> = _safFiles.asStateFlow()
+
+    fun setSafTreeUri(uri: android.net.Uri, context: Context) {
+        _safTreeUri.value = uri.toString()
+        refreshSafSafTree(context)
+    }
+
+    private fun refreshSafSafTree(context: Context) {
+        val uriStr = _safTreeUri.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val rootUri = android.net.Uri.parse(uriStr)
+                val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, rootUri)
+                if (rootDoc != null && rootDoc.isDirectory) {
+                    _safTreeName.value = rootDoc.name ?: "Carpeta Abierta"
+                    val fileList = mutableListOf<com.example.data.WorkspaceFile>()
+                    rootDoc.listFiles().forEach { doc ->
+                        fileList.add(
+                            com.example.data.WorkspaceFile(
+                                uri = doc.uri.toString(),
+                                name = doc.name ?: "Unknown",
+                                isDirectory = doc.isDirectory,
+                                level = 0
+                            )
+                        )
+                    }
+                    _safFiles.value = fileList.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun openFileInTab(file: com.example.data.WorkspaceFile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val uri = android.net.Uri.parse(file.uri)
+            val currentTabs = _openTabs.value.toMutableList()
+            var existing = currentTabs.find { it.path == file.uri }
+            
+            if (existing == null) {
+                try {
+                    val content = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+                    val existingInDb = repository.allFiles.first().find { it.path == file.uri }
+                    val finalFile = if (existingInDb != null) {
+                        repository.updateFile(existingInDb.copy(content = content))
+                        existingInDb.copy(content = content)
+                    } else {
+                        val newId = repository.insertFile(VirtualFile(name = file.name, content = content, path = file.uri))
+                        repository.getFileById(newId)!! 
+                    }
+                    viewModelScope.launch(Dispatchers.Main) { openFileInTab(finalFile) }
+                } catch (e: Exception) { e.printStackTrace() }
+            } else {
+                viewModelScope.launch(Dispatchers.Main) { selectTab(existing) }
             }
         }
     }
@@ -155,26 +231,64 @@ class EditorViewModel(private val repository: FileRepository) : ViewModel() {
         }
     }
 
-    fun createNewFile(name: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val extension = if (name.contains(".")) "" else ".js"
-            val newFile = VirtualFile(
-                name = "$name$extension",
-                content = """// Nuevo archivo de JavaScript: ${name}${extension}
-function init() {
-  console.log("¡Hola Mundo!");
-}
-
-init();
-"""
-            )
-            val newId = repository.insertFile(newFile)
-            val createdFile = repository.getFileById(newId)
-            if (createdFile != null) {
-                viewModelScope.launch(Dispatchers.Main) {
-                    openFileInTab(createdFile)
+    fun createNewFile(name: String, isDirectory: Boolean) {
+        val safRoot = _safTreeUri.value
+        if (safRoot != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val rootUri = android.net.Uri.parse(safRoot)
+                    val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, rootUri)
+                    if (rootDoc != null) {
+                        val newDoc = if (isDirectory) {
+                            rootDoc.createDirectory(name)
+                        } else {
+                            val ext = if (name.contains(".")) "" else ".js"
+                            val mimeType = if (name.endsWith(".js") || ext == ".js") "text/javascript" else "text/plain"
+                            rootDoc.createFile(mimeType, "$name$ext")
+                        }
+                        if (newDoc != null && !isDirectory) {
+                            val content = "// Nuevo archivo: ${newDoc.name}\n"
+                            context.contentResolver.openOutputStream(newDoc.uri)?.use { it.write(content.toByteArray()) }
+                        }
+                        refreshSafSafTree(context)
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+        } else {
+            // Fallback to internal virtual files
+            viewModelScope.launch(Dispatchers.IO) {
+                val extension = if (name.contains(".")) "" else ".js"
+                val newFile = VirtualFile(
+                    name = "$name$extension",
+                    content = "// Nuevo archivo: ${name}${extension}\n"
+                )
+                val newId = repository.insertFile(newFile)
+                val createdFile = repository.getFileById(newId)
+                if (createdFile != null) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        openFileInTab(createdFile)
+                    }
                 }
             }
+        }
+    }
+
+    fun createNewFile(name: String) {
+        createNewFile(name, false)
+    }
+
+    fun renameFile(uriStr: String, newName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val doc = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, android.net.Uri.parse(uriStr))
+                if (doc != null && doc.renameTo(newName)) {
+                    refreshSafSafTree(context)
+                    // Also update DB entry if it was mapped
+                    repository.allFiles.first().find { it.path == uriStr }?.let { vFile ->
+                        repository.updateFile(vFile.copy(name = newName))
+                    }
+                }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
@@ -196,6 +310,22 @@ init();
                     }
                 }
             }
+        }
+    }
+
+    fun deleteFile(file: com.example.data.WorkspaceFile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val doc = androidx.documentfile.provider.DocumentFile.fromSingleUri(context, android.net.Uri.parse(file.uri))
+                if (doc != null && doc.delete()) {
+                    refreshSafSafTree(context)
+                    // Remove from DB mapping
+                    repository.allFiles.first().find { it.path == file.uri }?.let { vFile ->
+                        repository.deleteFile(vFile)
+                        viewModelScope.launch(Dispatchers.Main) { closeTab(vFile.id) }
+                    }
+                }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
@@ -232,6 +362,12 @@ init();
             saveJob = viewModelScope.launch(Dispatchers.IO) {
                 delay(1000)
                 repository.updateFile(file.copy(content = processedContent))
+                if (file.path != "/") {
+                    try {
+                        val uri = android.net.Uri.parse(file.path)
+                        context.contentResolver.openOutputStream(uri, "wt")?.use { it.write(processedContent.toByteArray()) }
+                    } catch (e: Exception) { e.printStackTrace() }
+                }
             }
         }
 
@@ -268,8 +404,14 @@ init();
 
     private fun saveFileImmediately(id: Long, content: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.getFileById(id)?.let {
-                repository.updateFile(it.copy(content = content))
+            repository.getFileById(id)?.let { file ->
+                repository.updateFile(file.copy(content = content))
+                if (file.path != "/") {
+                    try {
+                        val uri = android.net.Uri.parse(file.path)
+                        context.contentResolver.openOutputStream(uri, "wt")?.use { it.write(content.toByteArray()) }
+                    } catch (e: Exception) { e.printStackTrace() }
+                }
             }
         }
     }
@@ -433,6 +575,18 @@ init();
         _isMinimapOpen.value = !_isMinimapOpen.value
     }
 
+    fun toggleMinimapTextVisibility() {
+        _isMinimapTextVisible.value = !_isMinimapTextVisible.value
+    }
+
+    fun toggleIndentGuides() {
+        _isIndentGuidesEnabled.value = !_isIndentGuidesEnabled.value
+    }
+
+    fun setEditorFontSize(size: Float) {
+        _editorFontSize.value = size
+    }
+
     fun togglePlugin(id: String) {
         PluginManager.togglePlugin(id)
     }
@@ -450,7 +604,7 @@ class EditorViewModelFactory(private val context: Context) : ViewModelProvider.F
             val database = AppDatabase.getDatabase(context)
             val repository = FileRepository(database.fileDao())
             @Suppress("UNCHECKED_CAST")
-            return EditorViewModel(repository) as T
+            return EditorViewModel(repository, context.applicationContext) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

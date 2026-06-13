@@ -380,15 +380,14 @@ fun ExplorerTabContent(viewModel: EditorViewModel, isDark: Boolean) {
                                 AsyncImage(
                                     model = ImageRequest.Builder(context)
                                         .data("file:///android_asset/svg_icons/folders/$folderSvg")
-                                        // FIX #5b: fallback a folder-open.svg / folder.svg si el específico no existe
                                         .error(
-                                            coil.request.ImageRequest.Builder(context)
-                                                .data("file:///android_asset/svg_icons/folders/${if (isExpanded) "folder-open.svg" else "folder.svg"}")
-                                                .build().data as Any
+                                           ImageRequest.Builder(context)
+                                             .data("file:///android_asset/svg_icons/folders/${if (isExpanded) "folder-open.svg" else "folder.svg"}")
+                                             .build()  // ✅ Pass the complete ImageRequest
                                         )
-                                        .build(),
+                                       .build(),
                                     contentDescription = "Carpeta",
-                                    imageLoader = imageLoader,  // ✅ reutilizado
+                                    imageLoader = imageLoader,
                                     modifier = Modifier.size(20.dp)
                                 )
                             } else {

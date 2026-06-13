@@ -31,6 +31,30 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _editorText = MutableStateFlow("")
     val editorText: StateFlow<String> = _editorText.asStateFlow()
 
+    private val undoStack = mutableListOf<String>()
+    private val redoStack = mutableListOf<String>()
+    private var isUndoRedoOperation = false
+
+    fun undo() {
+        if (undoStack.isNotEmpty()) {
+            val currentText = _editorText.value
+            redoStack.add(currentText)
+            val previousText = undoStack.removeLast()
+            isUndoRedoOperation = true
+            onEditorTextChanged(previousText, null, false)
+        }
+    }
+
+    fun redo() {
+        if (redoStack.isNotEmpty()) {
+            val currentText = _editorText.value
+            undoStack.add(currentText)
+            val nextText = redoStack.removeLast()
+            isUndoRedoOperation = true
+            onEditorTextChanged(nextText, null, false)
+        }
+    }
+
     // Cursor statistics
     private val _cursorPosition = MutableStateFlow(0)
     val cursorPosition: StateFlow<Int> = _cursorPosition.asStateFlow()
@@ -79,19 +103,21 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _activeSidebarTab = MutableStateFlow("explorer")
     val activeSidebarTab: StateFlow<String> = _activeSidebarTab.asStateFlow()
 
-    private val _themeIsDark = MutableStateFlow(true)
+    private val prefs = context.getSharedPreferences("js_editor_prefs", Context.MODE_PRIVATE)
+
+    private val _themeIsDark = MutableStateFlow(prefs.getBoolean("themeIsDark", true))
     val themeIsDark: StateFlow<Boolean> = _themeIsDark.asStateFlow()
 
-    private val _isMinimapOpen = MutableStateFlow(true)
+    private val _isMinimapOpen = MutableStateFlow(prefs.getBoolean("isMinimapOpen", true))
     val isMinimapOpen: StateFlow<Boolean> = _isMinimapOpen.asStateFlow()
 
-    private val _isMinimapTextVisible = MutableStateFlow(false)
+    private val _isMinimapTextVisible = MutableStateFlow(prefs.getBoolean("isMinimapTextVisible", false))
     val isMinimapTextVisible: StateFlow<Boolean> = _isMinimapTextVisible.asStateFlow()
 
-    private val _isIndentGuidesEnabled = MutableStateFlow(true)
+    private val _isIndentGuidesEnabled = MutableStateFlow(prefs.getBoolean("isIndentGuidesEnabled", true))
     val isIndentGuidesEnabled: StateFlow<Boolean> = _isIndentGuidesEnabled.asStateFlow()
 
-    private val _editorFontSize = MutableStateFlow(14f)
+    private val _editorFontSize = MutableStateFlow(prefs.getFloat("editorFontSize", 14f))
     val editorFontSize: StateFlow<Float> = _editorFontSize.asStateFlow()
 
     // Enabled plugins observer
@@ -102,13 +128,33 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private var saveJob: Job? = null
 
     init {
-        // Collect files to open the first sample file by default
+        // Restore SAF tree URI if saved
+        val savedSafTreeUri = prefs.getString("safTreeUri", null)
+        if (savedSafTreeUri != null) {
+            try {
+                val uri = android.net.Uri.parse(savedSafTreeUri)
+                setSafTreeUri(uri, context)
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+
+        // Collect files to open the first sample file by default, or restore
         viewModelScope.launch {
-            files.collect { activeFileList ->
-                if (activeFileList.isNotEmpty() && _activeFile.value == null) {
-                    val appJs = activeFileList.find { it.name == "app.js" } ?: activeFileList.first()
-                    openFileInTab(appJs)
-                }
+            val fileList = repository.allFiles.filter { it.isNotEmpty() }.first()
+            val savedActiveId = prefs.getLong("activeFileId", -1L)
+            val savedOpenIds = prefs.getString("openFileIds", "")?.split(",")?.mapNotNull { it.toLongOrNull() } ?: emptyList()
+            
+            val initialOpen = fileList.filter { it.id in savedOpenIds }
+            _openTabs.value = initialOpen
+            
+            val active = fileList.find { it.id == savedActiveId } ?: initialOpen.firstOrNull()
+            _activeFile.value = active
+            
+            if (active != null) {
+                _editorText.value = active.content
+                onEditorTextChanged(active.content, null, true)
+            } else if (fileList.isNotEmpty()) {
+                val appJs = fileList.find { it.name == "app.js" } ?: fileList.first()
+                openFileInTab(appJs)
             }
         }
     }
@@ -123,8 +169,31 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _safFiles = MutableStateFlow<List<com.example.data.WorkspaceFile>>(emptyList())
     val safFiles: StateFlow<List<com.example.data.WorkspaceFile>> = _safFiles.asStateFlow()
 
+    private fun saveTabsState() {
+        prefs.edit().apply {
+            putString("openFileIds", _openTabs.value.joinToString(",") { it.id.toString() })
+            putLong("activeFileId", _activeFile.value?.id ?: -1L)
+            apply()
+        }
+    }
+
     fun setSafTreeUri(uri: android.net.Uri, context: Context) {
         _safTreeUri.value = uri.toString()
+        prefs.edit().putString("safTreeUri", uri.toString()).apply()
+        refreshSafSafTree(context)
+    }
+
+    private val _expandedFolders = MutableStateFlow<Set<String>>(emptySet())
+    val expandedFolders: StateFlow<Set<String>> = _expandedFolders.asStateFlow()
+
+    fun toggleFolder(file: com.example.data.WorkspaceFile, context: Context) {
+        val expanded = _expandedFolders.value.toMutableSet()
+        if (expanded.contains(file.uri)) {
+            expanded.remove(file.uri)
+        } else {
+            expanded.add(file.uri)
+        }
+        _expandedFolders.value = expanded
         refreshSafSafTree(context)
     }
 
@@ -137,17 +206,27 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                 if (rootDoc != null && rootDoc.isDirectory) {
                     _safTreeName.value = rootDoc.name ?: "Carpeta Abierta"
                     val fileList = mutableListOf<com.example.data.WorkspaceFile>()
-                    rootDoc.listFiles().forEach { doc ->
-                        fileList.add(
-                            com.example.data.WorkspaceFile(
-                                uri = doc.uri.toString(),
-                                name = doc.name ?: "Unknown",
-                                isDirectory = doc.isDirectory,
-                                level = 0
+                    val expanded = _expandedFolders.value
+
+                    fun traverse(doc: androidx.documentfile.provider.DocumentFile, level: Int) {
+                        val children = doc.listFiles().sortedWith(compareBy({ !it.isDirectory }, { it.name?.lowercase() ?: "" }))
+                        children.forEach { child ->
+                            fileList.add(
+                                com.example.data.WorkspaceFile(
+                                    uri = child.uri.toString(),
+                                    name = child.name ?: "Unknown",
+                                    isDirectory = child.isDirectory,
+                                    level = level
+                                )
                             )
-                        )
+                            if (child.isDirectory && expanded.contains(child.uri.toString())) {
+                                traverse(child, level + 1)
+                            }
+                        }
                     }
-                    _safFiles.value = fileList.sortedWith(compareBy({ !it.isDirectory }, { it.name.lowercase() }))
+
+                    traverse(rootDoc, 0)
+                    _safFiles.value = fileList
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -185,6 +264,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         if (!currentTabs.any { it.id == file.id }) {
             currentTabs.add(file)
             _openTabs.value = currentTabs
+            saveTabsState()
         }
         selectTab(file)
     }
@@ -200,6 +280,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         _editorText.value = file.content
         _foldedStartLines.value = emptySet() // Reset folding state for a new file context
         onEditorTextChanged(file.content, addedChar = null, triggerCursorUpdate = true)
+        saveTabsState()
     }
 
     fun closeTab(fileId: Long) {
@@ -217,7 +298,10 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                 } else {
                     _activeFile.value = null
                     _editorText.value = ""
+                    saveTabsState()
                 }
+            } else {
+                saveTabsState()
             }
             
             // Save closed file to DB
@@ -339,6 +423,17 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     }
 
     fun onEditorTextChanged(newContent: String, addedChar: Char? = null, triggerCursorUpdate: Boolean = false) {
+        if (!isUndoRedoOperation && _editorText.value != newContent && _editorText.value.isNotEmpty()) {
+            // Check if last item is similar or if we should aggregate (simple version: add every 10 strokes or pause)
+            // For now, we'll just add everything if it's not a tiny change or maybe add everything 
+            if (undoStack.isEmpty() || undoStack.last() != _editorText.value) {
+                undoStack.add(_editorText.value)
+                if (undoStack.size > 50) undoStack.removeFirst()
+                redoStack.clear()
+            }
+        }
+        isUndoRedoOperation = false
+
         var processedContent = newContent
         var processedCursor = _cursorPosition.value
 
@@ -375,7 +470,8 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         parseJob?.cancel()
         parseJob = viewModelScope.launch(Dispatchers.Default) {
             delay(150)
-            val result = JsParser.analyze(processedContent)
+            val ext = _activeFile.value?.name?.substringAfterLast('.', "js") ?: "js"
+            val result = JsParser.analyze(processedContent, ext)
             _diagnostics.value = result.diagnostics
             _symbols.value = result.symbols
             _foldableRanges.value = result.foldableRanges
@@ -568,23 +664,32 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     }
 
     fun toggleTheme() {
-        _themeIsDark.value = !_themeIsDark.value
+        val newVal = !_themeIsDark.value
+        _themeIsDark.value = newVal
+        prefs.edit().putBoolean("themeIsDark", newVal).apply()
     }
 
     fun toggleMinimap() {
-        _isMinimapOpen.value = !_isMinimapOpen.value
+        val newVal = !_isMinimapOpen.value
+        _isMinimapOpen.value = newVal
+        prefs.edit().putBoolean("isMinimapOpen", newVal).apply()
     }
 
     fun toggleMinimapTextVisibility() {
-        _isMinimapTextVisible.value = !_isMinimapTextVisible.value
+        val newVal = !_isMinimapTextVisible.value
+        _isMinimapTextVisible.value = newVal
+        prefs.edit().putBoolean("isMinimapTextVisible", newVal).apply()
     }
 
     fun toggleIndentGuides() {
-        _isIndentGuidesEnabled.value = !_isIndentGuidesEnabled.value
+        val newVal = !_isIndentGuidesEnabled.value
+        _isIndentGuidesEnabled.value = newVal
+        prefs.edit().putBoolean("isIndentGuidesEnabled", newVal).apply()
     }
 
     fun setEditorFontSize(size: Float) {
         _editorFontSize.value = size
+        prefs.edit().putFloat("editorFontSize", size).apply()
     }
 
     fun togglePlugin(id: String) {

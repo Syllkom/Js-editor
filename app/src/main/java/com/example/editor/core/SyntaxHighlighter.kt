@@ -23,7 +23,10 @@ enum class TokenType {
     OPERATOR,         // +, -, *, /, =, &&, || etc.
     IDENTIFIER,       // normal variables
     HEX_COLOR,        // #FFFFFF, #FFF etc.
-    TEXT
+    TEXT,
+    BRACE_CURLY,      // { }
+    BRACE_SQUARE,     // [ ]
+    BRACE_PAREN       // ( )
 }
 
 data class Token(val type: TokenType, val range: IntRange, val originalString: String? = null)
@@ -40,7 +43,10 @@ class JsThemeColors(
     val operator: Color,
     val identifier: Color,
     val text: Color,
-    val background: Color
+    val background: Color,
+    val braceCurly: Color,
+    val braceSquare: Color,
+    val braceParen: Color
 ) {
     companion object {
         val VSCODE_DARK = JsThemeColors(
@@ -55,7 +61,10 @@ class JsThemeColors(
             operator = Color(0xFFD4D4D4),       // White-Grey
             identifier = Color(0xFF9CDCFE),     // Light Blue-Grey
             text = Color(0xFFD4D4D4),           // Soft White
-            background = Color(0xFF1E1E1E)      // Classic VS Code Dark
+            background = Color(0xFF1E1E1E),     // Classic VS Code Dark
+            braceCurly = Color(0xFFFFA500),     // Orange
+            braceSquare = Color(0xFFE06C75),    // Purple-Red
+            braceParen = Color(0xFFE5C07B)      // Yellow
         )
 
         val VSCODE_LIGHT = JsThemeColors(
@@ -70,7 +79,10 @@ class JsThemeColors(
             operator = Color(0xFF333333),       // Charcoal
             identifier = Color(0xFF001080),     // Dark Navy
             text = Color(0xFF333333),           // Soft Black
-            background = Color(0xFFF3F3F3)      // Light Slate Grey
+            background = Color(0xFFF3F3F3),     // Light Slate Grey
+            braceCurly = Color(0xFFA05A00),     // Dark Orange
+            braceSquare = Color(0xFF982531),    // Dark Purple-Red
+            braceParen = Color(0xFF7A6836)      // Dark Yellow
         )
     }
 }
@@ -116,6 +128,9 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                     )
                 }
                 TokenType.TEXT -> SpanStyle(color = colors.text)
+                TokenType.BRACE_CURLY -> SpanStyle(color = colors.braceCurly)
+                TokenType.BRACE_SQUARE -> SpanStyle(color = colors.braceSquare)
+                TokenType.BRACE_PAREN -> SpanStyle(color = colors.braceParen)
             }
             builder.addStyle(style, token.range.start, token.range.endInclusive + 1)
         }
@@ -200,7 +215,12 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                         else if (token.range.first > pos) 1
                         else 0
                     }
-                    if (matchIndex >= 0 && tokens[matchIndex].type == TokenType.OPERATOR) return c
+                    if (matchIndex >= 0) {
+                        val tType = tokens[matchIndex].type
+                        if (tType == TokenType.OPERATOR || tType == TokenType.BRACE_CURLY || tType == TokenType.BRACE_SQUARE || tType == TokenType.BRACE_PAREN) {
+                            return c
+                        }
+                    }
                 }
                 return null
             }
@@ -346,9 +366,16 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
 
             // 5. Operators & Brackets
             val opChar = remaining[0]
-            val opString = opChar.toString()
-            if ("{}()[]+-*/%=&|^!~?:;.,".contains(opChar)) {
-                tokens.add(Token(TokenType.OPERATOR, index..index))
+            val type = when (opChar) {
+                '{', '}' -> TokenType.BRACE_CURLY
+                '[', ']' -> TokenType.BRACE_SQUARE
+                '(', ')' -> TokenType.BRACE_PAREN
+                else -> {
+                    if ("+-*/%=&|^!~?:;.,".contains(opChar)) TokenType.OPERATOR else TokenType.TEXT
+                }
+            }
+            if (type != TokenType.TEXT || "{}[]()+-*/%=&|^!~?:;.,".contains(opChar)) {
+                tokens.add(Token(if (type == TokenType.TEXT) TokenType.OPERATOR else type, index..index))
                 index++
                 continue
             }

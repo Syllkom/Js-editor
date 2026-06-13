@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Cuerpo principal de la carpeta -->
+  <path fill="#1976d2" d="M14 5H7.562a1 1 0 0 1-.64-.232l-.644-.536A1 1 0 0 0 5.638 3H2a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1Z"/>
+  <!-- Brillo / reflejo superior de la solapa -->
+  <path fill="#bbdefb" d="M2 6h12v1H2Z" opacity="0.5"/>
+</svg>

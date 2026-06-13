@@ -54,7 +54,7 @@ object JsParser {
      * 2. Symbols (Functions, Classes for tree/outline navigation)
      * 3. Foldable ranges (Blocks spanned by matching { ... })
      */
-    fun analyze(code: String): ParseResult {
+    fun analyze(code: String, fileExtension: String = "js"): ParseResult {
         val diagnostics = ArrayList<JsDiagnostic>()
         val symbols = ArrayList<JsSymbol>()
         val folds = ArrayList<FoldingRange>()
@@ -77,6 +77,39 @@ object JsParser {
             // Skip fully commented or empty lines
             if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*")) {
                 continue
+            }
+
+            // Check common typos like conts when it's JS
+            if (fileExtension == "js") {
+                val typoPattern = Pattern.compile("\\b(conts|functon|funtion|rturn|viod)\\b")
+                val typoMatcher = typoPattern.matcher(trimmed)
+                if (typoMatcher.find()) {
+                    val typo = typoMatcher.group(1) ?: ""
+                    val correct = when(typo) {
+                        "conts" -> "const"
+                        "functon", "funtion" -> "function"
+                        "rturn" -> "return"
+                        "viod" -> "void"
+                        else -> "const"
+                    }
+                    val offsetPatternStart = getLineStartIndex(code, i) + rawLine.indexOf(typo)
+                    diagnostics.add(
+                        JsDiagnostic(
+                            id = "typo_${lineNum}",
+                            level = DiagnosticLevel.ERROR,
+                            message = "Posible error tipográfico: '$typo'. ¿Quisiste decir '$correct'?",
+                            line = lineNum,
+                            column = rawLine.indexOf(typo),
+                            term = typo,
+                            fixAction = QuickFixAction(
+                                    title = "Cambiar a '$correct'",
+                                    replacementText = correct,
+                                    rangeToReplace = offsetPatternStart until (offsetPatternStart + typo.length),
+                                    lineToReplace = lineNum
+                            )
+                        )
+                    )
+                }
             }
 
             // Check Bracket matching by scanning characters
@@ -178,7 +211,7 @@ object JsParser {
             }
 
             // 4. Missing semicolon warnings (for standard statements return, let, const, assignment)
-            if (!inBacktickString && trimmed.length > 2) {
+            if (!inBacktickString && trimmed.length > 2 && fileExtension == "js") {
                 val shouldEndWithSemicolon = (trimmed.startsWith("let ") || 
                                               trimmed.startsWith("const ") || 
                                               trimmed.startsWith("var ") || 

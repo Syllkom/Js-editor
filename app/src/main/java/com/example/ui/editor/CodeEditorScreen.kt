@@ -32,6 +32,7 @@ import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -56,6 +57,39 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.VirtualFile
 import com.example.editor.core.*
 import kotlinx.coroutines.launch
+import coil.compose.AsyncImage
+import coil.decode.SvgDecoder
+import coil.ImageLoader
+import coil.request.ImageRequest
+
+fun getFolderIcon(folderName: String, isOpen: Boolean): String {
+    val name = folderName.lowercase()
+    val availableIcons = setOf(
+        "admin", "archive", "audio", "backup", "base", "command", "core", "download",
+        "event", "export", "features", "font", "git", "github", "gitlab", "home",
+        "images", "import", "include", "javascript", "lib", "log", "markdown", "node",
+        "other", "packages", "plugin", "private", "prompts", "proto", "public",
+        "react-components", "repository", "resource", "scripts", "secure", "shared",
+        "src", "svg", "temp", "tools", "trash", "typescript", "ui", "upload", "video", "views"
+    )
+    
+    // Some common aliases
+    val mappedName = when (name) {
+        "assets" -> "images"
+        "components" -> "react-components"
+        "js" -> "javascript"
+        "ts" -> "typescript"
+        "md" -> "markdown"
+        "styles", "css" -> "ui"
+        else -> name
+    }
+
+    return if (availableIcons.contains(mappedName)) {
+        "folder-$mappedName.svg"
+    } else {
+        if (isOpen) "folder-open.svg" else "folder.svg"
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -161,7 +195,7 @@ fun CodeEditorScreen(
                         }
                     } else {
                         // Empty Workspace state
-                        EmptyEditorState(isDark, textColor)
+                        EmptyEditorState(viewModel, isDark, textColor)
                     }
                 }
             }
@@ -408,6 +442,7 @@ fun ExplorerTabContent(viewModel: EditorViewModel, isDark: Boolean) {
     val safTreeUri by viewModel.safTreeUri.collectAsStateWithLifecycle()
     val safTreeName by viewModel.safTreeName.collectAsStateWithLifecycle()
     val safFiles by viewModel.safFiles.collectAsStateWithLifecycle()
+    val openFolders by viewModel.expandedFolders.collectAsStateWithLifecycle()
     
     var showCreateDialog by remember { mutableStateOf(false) }
     var showFolderCreateDialog by remember { mutableStateOf(false) }
@@ -528,41 +563,52 @@ fun ExplorerTabContent(viewModel: EditorViewModel, isDark: Boolean) {
                             .background(itemBg)
                             .clickable {
                                 if (file.isDirectory) {
-                                    // Expand/Collapse folder if we had a tree, 
-                                    // for flat structure maybe just ignore or handle navigation
+                                    viewModel.toggleFolder(file, context)
                                 } else {
                                     viewModel.openFileInTab(file)
                                 }
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp)
-                            // Basic indent for level if we do tree
-                            .padding(start = (file.level * 12).dp),
+                            .padding(start = (file.level * 16).dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        val imageLoader = ImageLoader.Builder(LocalContext.current)
+                            .components { add(SvgDecoder.Factory()) }
+                            .build()
+                            
                         if (file.isDirectory) {
-                            Icon(
-                                imageVector = Icons.Default.List,
+                            val isExpanded = openFolders.contains(file.uri)
+                            val folderSvgFolder = getFolderIcon(file.name, isExpanded)
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data("file:///android_asset/svg_icons/folders/$folderSvgFolder")
+                                    .build(),
                                 contentDescription = "Carpeta",
-                                tint = Color(0xFF64B5F6),
+                                imageLoader = imageLoader,
                                 modifier = Modifier.size(20.dp)
                             )
                         } else {
-                            // JS Icon representation
-                            val isJS = file.name.endsWith(".js")
-                            Box(
-                                modifier = Modifier
-                                    .size(20.dp)
-                                    .clip(RoundedCornerShape(3.dp))
-                                    .background(if (isJS) Color(0xFFF1DC50) else Color.Gray),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    if (isJS) "JS" else "TXT",
-                                    color = Color.Black,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
+                            val ext = file.name.substringAfterLast('.', "")
+                            val svgName = when (ext) {
+                                "js", "mjs", "cjs" -> "javascript.svg"
+                                "jsx" -> "react.svg"
+                                "ts" -> "typescript.svg"
+                                "tsx" -> "react_ts.svg"
+                                "json" -> "json.svg"
+                                "md" -> "markdown.svg"
+                                "html" -> "html.svg"
+                                "css" -> "css.svg"
+                                "xml" -> "xml.svg"
+                                else -> "document.svg"
                             }
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data("file:///android_asset/svg_icons/files/$svgName")
+                                    .build(),
+                                contentDescription = "Archivo",
+                                imageLoader = imageLoader,
+                                modifier = Modifier.size(20.dp)
+                            )
                         }
                         
                         Spacer(modifier = Modifier.width(10.dp))
@@ -1161,7 +1207,6 @@ fun TabSystem(viewModel: EditorViewModel, isDark: Boolean) {
             .fillMaxWidth()
             .height(35.dp)
             .background(barBackground)
-            .horizontalScroll(rememberScrollState())
             .drawBehind {
                 drawLine(
                     color = borderColor,
@@ -1172,7 +1217,13 @@ fun TabSystem(viewModel: EditorViewModel, isDark: Boolean) {
             },
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (openTabs.isEmpty()) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (openTabs.isEmpty()) {
             Box(Modifier.fillMaxHeight().padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
                 Text("Carga un script para comenzar", fontSize = 11.sp, color = Color.Gray)
             }
@@ -1210,12 +1261,30 @@ fun TabSystem(viewModel: EditorViewModel, isDark: Boolean) {
                         .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "JS",
-                        color = Color(0xFFE5A823),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(end = 6.dp)
+                    val imageLoader = ImageLoader.Builder(LocalContext.current)
+                        .components { add(SvgDecoder.Factory()) }
+                        .build()
+                        
+                    val ext = file.name.substringAfterLast('.', "")
+                    val svgName = when (ext) {
+                        "js", "mjs", "cjs" -> "javascript.svg"
+                        "jsx" -> "react.svg"
+                        "ts" -> "typescript.svg"
+                        "tsx" -> "react_ts.svg"
+                        "json" -> "json.svg"
+                        "md" -> "markdown.svg"
+                        "html" -> "html.svg"
+                        "css" -> "css.svg"
+                        "xml" -> "xml.svg"
+                        else -> "document.svg"
+                    }
+                    AsyncImage(
+                        model = ImageRequest.Builder(LocalContext.current)
+                            .data("file:///android_asset/svg_icons/files/$svgName")
+                            .build(),
+                        contentDescription = "Archivo",
+                        imageLoader = imageLoader,
+                        modifier = Modifier.size(16.dp).padding(end = 4.dp)
                     )
 
                     Text(
@@ -1241,6 +1310,38 @@ fun TabSystem(viewModel: EditorViewModel, isDark: Boolean) {
                         )
                     }
                 }
+            }
+        }
+        } // MISSING BRACKET FOR ROW
+
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 8.dp)) {
+            val isMarkdown = activeFile?.name?.endsWith(".md", ignoreCase = true) == true
+            if (isMarkdown) {
+                var showPreview by remember { mutableStateOf(false) }
+                IconButton(onClick = { showPreview = !showPreview }, modifier = Modifier.size(32.dp)) {
+                    Text(if (showPreview) "CODE" else "PREV", fontSize = 10.sp, color = if (isDark) Color.White else Color.Black, fontWeight = FontWeight.Bold)
+                }
+                if (showPreview) {
+                    androidx.compose.ui.window.Dialog(onDismissRequest = { showPreview = false }) {
+                        Box(modifier = Modifier.fillMaxSize().background(barBackground).padding(vertical = 16.dp)) {
+                            MarkdownPreview(markdownText = viewModel.editorText.collectAsStateWithLifecycle().value, isDark = isDark)
+                            androidx.compose.material3.FloatingActionButton(
+                                onClick = { showPreview = false },
+                                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
+                                containerColor = if (isDark) Color(0xFF2D2D2D) else Color(0xFFE5E5E5)
+                            ) {
+                                Icon(Icons.Default.Close, "Cerrar", tint = if (isDark) Color.White else Color.Black)
+                            }
+                        }
+                    }
+                }
+            }
+            
+            IconButton(onClick = { viewModel.undo() }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.ArrowBack, contentDescription = "Undo", modifier = Modifier.size(16.dp), tint = if (isDark) Color.White else Color.Black)
+            }
+            IconButton(onClick = { viewModel.redo() }, modifier = Modifier.size(28.dp)) {
+                Icon(Icons.Default.ArrowForward, contentDescription = "Redo", modifier = Modifier.size(16.dp), tint = if (isDark) Color.White else Color.Black)
             }
         }
     }
@@ -1362,7 +1463,7 @@ fun EditorCanvas(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Spacer(modifier = Modifier.height(10.dp))
-            
+            val lineHeightDp = with(androidx.compose.ui.platform.LocalDensity.current) { (editorFontSize * 1.5).sp.toDp() }
             for (i in 0 until lineCountState) {
                 val line1Idx = i + 1
                 val isLineFolded = foldedStartLines.contains(line1Idx)
@@ -1373,7 +1474,7 @@ fun EditorCanvas(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height((editorFontSize * 1.5).dp),
+                        .height(lineHeightDp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1405,13 +1506,23 @@ fun EditorCanvas(
         }
 
         // Active Text Field with inline overlays
+        val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+        val keyboardController = LocalSoftwareKeyboardController.current
         var showContextMenu by remember { mutableStateOf(false) }
         var menuOffset by remember { mutableStateOf(Offset.Zero) }
 
+        var visualScale by remember { mutableFloatStateOf(1f) }
         val transformableState = rememberTransformableState { zoomChange, panChange, rotationChange ->
-            val newZoom = (editorFontSize * zoomChange).coerceIn(8f, 32f)
-            if (newZoom != editorFontSize) {
-                viewModel.setEditorFontSize(newZoom)
+            visualScale *= zoomChange
+            val minScale = 8f / editorFontSize
+            val maxScale = 32f / editorFontSize
+            visualScale = visualScale.coerceIn(minScale, maxScale)
+        }
+
+        LaunchedEffect(transformableState.isTransformInProgress) {
+            if (!transformableState.isTransformInProgress && visualScale != 1f) {
+                viewModel.setEditorFontSize((editorFontSize * visualScale).coerceIn(8f, 32f))
+                visualScale = 1f
             }
         }
 
@@ -1419,11 +1530,15 @@ fun EditorCanvas(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .transformable(state = transformableState)
+                .transformable(transformableState)
                 .verticalScroll(scrollState)
                 .horizontalScroll(rememberScrollState())
                 .pointerInput(Unit) {
                     detectTapGestures(
+                        onTap = { 
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                        },
                         onLongPress = { offset ->
                             menuOffset = offset
                             showContextMenu = true
@@ -1700,6 +1815,7 @@ fun EditorCanvas(
                     visualTransformation = highlighter,
                     cursorBrush = SolidColor(if (isDark) Color.White else Color.Black),
                     modifier = Modifier
+                        .focusRequester(focusRequester)
                         .fillMaxWidth()
                         .wrapContentHeight()
                         .drawBehind {
@@ -1715,11 +1831,42 @@ fun EditorCanvas(
                                     )
                                     val lines = tvState.text.split("\n")
                                     val maxLines = minOf(layout.lineCount, lines.size)
+                                    
+                                    val indentLevels = IntArray(maxLines) { -1 }
+                                    var currentIndent = 0
                                     for (i in 0 until maxLines) {
                                         val lineText = lines[i]
-                                        val leadingSpaces = lineText.takeWhile { it == ' ' }.length
+                                        if (lineText.isBlank()) {
+                                            indentLevels[i] = -1
+                                        } else {
+                                            val spaces = lineText.takeWhile { it == ' ' }.length
+                                            indentLevels[i] = spaces
+                                            currentIndent = spaces
+                                        }
+                                    }
+                                    
+                                    var nextIndent = 0
+                                    for (i in maxLines - 1 downTo 0) {
+                                        if (indentLevels[i] == -1) {
+                                            indentLevels[i] = minOf(currentIndent, nextIndent)
+                                        } else {
+                                            nextIndent = indentLevels[i]
+                                            currentIndent = indentLevels[i]
+                                        }
+                                    }
+                                    
+                                    for (i in 0 until maxLines) {
+                                        val leadingSpaces = indentLevels[i]
                                         for (spaceLevel in 2..leadingSpaces step 2) {
-                                            val xPos = layout.getHorizontalPosition(layout.getLineStart(i) + spaceLevel, true)
+                                            // Empty lines might throw exception if we measure past its text end, 
+                                            // so measure the width of spaceLevel standard spaces.
+                                            val xPosIfEmpty = layout.getHorizontalPosition(layout.getLineStart(i), true) + (layout.getHorizontalPosition(layout.getLineStart(0)+1, true) - layout.getHorizontalPosition(layout.getLineStart(0), true)) * spaceLevel
+                                            val xPos = try {
+                                                if (lines[i].length >= spaceLevel) {
+                                                    layout.getHorizontalPosition(layout.getLineStart(i) + spaceLevel, true)
+                                                } else xPosIfEmpty
+                                            } catch(e: Exception) { xPosIfEmpty }
+                                            
                                             val yStart = layout.getLineTop(i)
                                             val yEnd = layout.getLineBottom(i)
                                             val colorIndex = ((spaceLevel / 2) - 1).coerceAtLeast(0) % guideColors.size
@@ -1727,7 +1874,7 @@ fun EditorCanvas(
                                                 color = guideColors[colorIndex],
                                                 start = Offset(xPos, yStart),
                                                 end = Offset(xPos, yEnd),
-                                                strokeWidth = 2f
+                                                strokeWidth = 1.5f
                                             )
                                         }
                                     }
@@ -1951,7 +2098,7 @@ fun MinimapPane(viewModel: EditorViewModel, isDark: Boolean, scrollState: Scroll
 
 // --------------------- EMPTY EDITOR STATE PLACEHOLDER ---------------------
 @Composable
-fun EmptyEditorState(isDark: Boolean, textColor: Color) {
+fun EmptyEditorState(viewModel: EditorViewModel, isDark: Boolean, textColor: Color) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -1989,6 +2136,18 @@ fun EmptyEditorState(isDark: Boolean, textColor: Color) {
                 modifier = Modifier.fillMaxWidth(0.8f),
                 textAlign = TextAlign.Center
             )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Button(
+                onClick = { 
+                    val file = com.example.data.VirtualFile(1L, "app.js", "console.log('Hello World!');")
+                    viewModel.openFileInTab(file)
+                },
+                colors = androidx.compose.material3.ButtonDefaults.buttonColors(containerColor = Color(0xFF007ACC))
+            ) {
+                Text("Abrir Archivo de Ejemplo", color = Color.White)
+            }
         }
     }
 }

@@ -26,6 +26,10 @@ jobs:
         with:
           gradle-version: 9.3.1
 
+      - name: Generate Debug Keystore
+        run: |
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "cn=Unknown, ou=Unknown, o=Unknown, c=Unknown"
+
       - name: Build Debug and Release APKs
         run: gradle assembleDebug assembleRelease
 

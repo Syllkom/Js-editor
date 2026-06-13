@@ -17,18 +17,15 @@ import kotlinx.coroutines.runBlocking
 
 class EditorViewModel(private val repository: FileRepository, private val context: Context) : ViewModel() {
 
-    // Files state
     val files: StateFlow<List<VirtualFile>> = repository.allFiles
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Tabs state
     private val _openTabs = MutableStateFlow<List<VirtualFile>>(emptyList())
     val openTabs: StateFlow<List<VirtualFile>> = _openTabs.asStateFlow()
 
     private val _activeFile = MutableStateFlow<VirtualFile?>(null)
     val activeFile: StateFlow<VirtualFile?> = _activeFile.asStateFlow()
 
-    // Editor live content buffer
     private val _editorText = MutableStateFlow("")
     val editorText: StateFlow<String> = _editorText.asStateFlow()
 
@@ -56,7 +53,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         }
     }
 
-    // Cursor statistics
     private val _cursorPosition = MutableStateFlow(0)
     val cursorPosition: StateFlow<Int> = _cursorPosition.asStateFlow()
 
@@ -66,7 +62,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _cursorColumn = MutableStateFlow(1)
     val cursorColumn: StateFlow<Int> = _cursorColumn.asStateFlow()
 
-    // Parser results
     private val _diagnostics = MutableStateFlow<List<JsDiagnostic>>(emptyList())
     val diagnostics: StateFlow<List<JsDiagnostic>> = _diagnostics.asStateFlow()
 
@@ -76,11 +71,9 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _foldableRanges = MutableStateFlow<List<FoldingRange>>(emptyList())
     val foldableRanges: StateFlow<List<FoldingRange>> = _foldableRanges.asStateFlow()
 
-    // Active folded (hidden) start lines
     private val _foldedStartLines = MutableStateFlow<Set<Int>>(emptySet())
     val foldedStartLines: StateFlow<Set<Int>> = _foldedStartLines.asStateFlow()
 
-    // Global Search & Replace states
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
@@ -96,7 +89,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _isSearchOpen = MutableStateFlow(false)
     val isSearchOpen: StateFlow<Boolean> = _isSearchOpen.asStateFlow()
 
-    // UI Panel controller
     private val _isSidebarOpen = MutableStateFlow(false)
     val isSidebarOpen: StateFlow<Boolean> = _isSidebarOpen.asStateFlow()
 
@@ -120,24 +112,36 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     private val _editorFontSize = MutableStateFlow(prefs.getFloat("editorFontSize", 14f))
     val editorFontSize: StateFlow<Float> = _editorFontSize.asStateFlow()
 
-    // Enabled plugins observer
     val enabledPluginIds: StateFlow<Set<String>> = PluginManager.enabledPluginIds
 
-    // Jobs
     private var parseJob: Job? = null
     private var saveJob: Job? = null
 
+    // FIX #4: Referencia al SAF tree URI guardada en prefs para restaurarla al reiniciar
+    private val _safTreeUri = MutableStateFlow<String?>(null)
+    val safTreeUri: StateFlow<String?> = _safTreeUri.asStateFlow()
+
+    private val _safTreeName = MutableStateFlow<String?>(null)
+    val safTreeName: StateFlow<String?> = _safTreeName.asStateFlow()
+
+    private val _safFiles = MutableStateFlow<List<com.example.data.WorkspaceFile>>(emptyList())
+    val safFiles: StateFlow<List<com.example.data.WorkspaceFile>> = _safFiles.asStateFlow()
+
+    private val _expandedFolders = MutableStateFlow<Set<String>>(emptySet())
+    val expandedFolders: StateFlow<Set<String>> = _expandedFolders.asStateFlow()
+
     init {
-        // Restore SAF tree URI if saved
+        // FIX #4a: Restaurar SAF tree URI de SharedPreferences al iniciar
+        // Antes no se guardaba la URI del árbol SAF, por lo que al cerrar la app se perdía
         val savedSafTreeUri = prefs.getString("safTreeUri", null)
         if (savedSafTreeUri != null) {
-            try {
-                val uri = android.net.Uri.parse(savedSafTreeUri)
-                setSafTreeUri(uri, context)
-            } catch (e: Exception) { e.printStackTrace() }
+            _safTreeUri.value = savedSafTreeUri
+            // Restaurar nombre y árbol de forma asíncrona sin bloquear el init
+            viewModelScope.launch(Dispatchers.IO) {
+                refreshSafTreeInternal(savedSafTreeUri)
+            }
         }
 
-        // Restore open tabs and active file from prefs
         viewModelScope.launch {
             val fileList = repository.allFiles.filter { it.isNotEmpty() }.first()
             val savedActiveId = prefs.getLong("activeFileId", -1L)
@@ -150,28 +154,19 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             val active = fileList.find { it.id == savedActiveId } ?: initialOpen.firstOrNull()
 
             if (active != null) {
-                // FIX #1: Al restaurar un archivo SAF, releer el contenido actualizado del disco.
-                // Antes solo se usaba el content guardado en la DB, que podía estar desactualizado
-                // si la app se cerró antes de que el saveJob (delay 1000ms) llegara a ejecutarse.
+                // FIX #1: Releer el contenido actualizado desde disco al restaurar
                 var freshContent = active.content
                 if (active.path.isNotEmpty() && active.path != "/") {
                     try {
                         val uri = android.net.Uri.parse(active.path)
                         val diskContent = context.contentResolver
-                            .openInputStream(uri)
-                            ?.bufferedReader()
-                            ?.use { it.readText() }
+                            .openInputStream(uri)?.bufferedReader()?.use { it.readText() }
                         if (diskContent != null) {
                             freshContent = diskContent
-                            // Sincronizar DB con lo que hay en disco
                             repository.updateFile(active.copy(content = freshContent))
                         }
-                    } catch (e: Exception) {
-                        // Permiso revocado u otro error: usar el content de la DB como fallback
-                        e.printStackTrace()
-                    }
+                    } catch (e: Exception) { e.printStackTrace() }
                 }
-
                 _activeFile.value = active.copy(content = freshContent)
                 _editorText.value = freshContent
                 onEditorTextChanged(freshContent, null, true)
@@ -182,16 +177,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         }
     }
 
-    // Directory SAF state
-    private val _safTreeUri = MutableStateFlow<String?>(null)
-    val safTreeUri: StateFlow<String?> = _safTreeUri.asStateFlow()
-
-    private val _safTreeName = MutableStateFlow<String?>(null)
-    val safTreeName: StateFlow<String?> = _safTreeName.asStateFlow()
-
-    private val _safFiles = MutableStateFlow<List<com.example.data.WorkspaceFile>>(emptyList())
-    val safFiles: StateFlow<List<com.example.data.WorkspaceFile>> = _safFiles.asStateFlow()
-
     private fun saveTabsState() {
         prefs.edit().apply {
             putString("openFileIds", _openTabs.value.joinToString(",") { it.id.toString() })
@@ -201,56 +186,81 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     }
 
     fun setSafTreeUri(uri: android.net.Uri, context: Context) {
-        _safTreeUri.value = uri.toString()
-        prefs.edit().putString("safTreeUri", uri.toString()).apply()
-        refreshSafSafTree(context)
+        val uriStr = uri.toString()
+        _safTreeUri.value = uriStr
+        // FIX #4b: Persistir la URI del SAF tree en SharedPreferences
+        prefs.edit().putString("safTreeUri", uriStr).apply()
+        viewModelScope.launch(Dispatchers.IO) {
+            refreshSafTreeInternal(uriStr)
+        }
     }
-
-    private val _expandedFolders = MutableStateFlow<Set<String>>(emptySet())
-    val expandedFolders: StateFlow<Set<String>> = _expandedFolders.asStateFlow()
 
     fun toggleFolder(file: com.example.data.WorkspaceFile, context: Context) {
         val expanded = _expandedFolders.value.toMutableSet()
         if (expanded.contains(file.uri)) expanded.remove(file.uri) else expanded.add(file.uri)
         _expandedFolders.value = expanded
-        refreshSafSafTree(context)
-    }
-
-    private fun refreshSafSafTree(context: Context) {
-        val uriStr = _safTreeUri.value ?: return
+        // FIX #1 apertura carpetas: llamar versión interna directamente (no lanza nueva coroutine)
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val rootUri = android.net.Uri.parse(uriStr)
-                val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, rootUri)
-                if (rootDoc != null && rootDoc.isDirectory) {
-                    _safTreeName.value = rootDoc.name ?: "Carpeta Abierta"
-                    val fileList = mutableListOf<com.example.data.WorkspaceFile>()
-                    val expanded = _expandedFolders.value
-
-                    fun traverse(doc: androidx.documentfile.provider.DocumentFile, level: Int) {
-                        val children = doc.listFiles()
-                            .sortedWith(compareBy({ !it.isDirectory }, { it.name?.lowercase() ?: "" }))
-                        children.forEach { child ->
-                            fileList.add(
-                                com.example.data.WorkspaceFile(
-                                    uri = child.uri.toString(),
-                                    name = child.name ?: "Unknown",
-                                    isDirectory = child.isDirectory,
-                                    level = level
-                                )
-                            )
-                            if (child.isDirectory && expanded.contains(child.uri.toString())) {
-                                traverse(child, level + 1)
-                            }
-                        }
-                    }
-
-                    traverse(rootDoc, 0)
-                    _safFiles.value = fileList
-                }
-            } catch (e: Exception) { e.printStackTrace() }
+            refreshSafTreeInternal(_safTreeUri.value ?: return@launch)
         }
     }
+
+    // FIX #1 apertura carpetas: función interna suspend en IO, no lanza coroutine anidada
+    private suspend fun refreshSafTreeInternal(uriStr: String) {
+        try {
+            val rootUri = android.net.Uri.parse(uriStr)
+            val rootDoc = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, rootUri)
+                ?: return
+            if (!rootDoc.isDirectory) return
+
+            // Actualizar nombre en hilo principal
+            val name = rootDoc.name ?: "Carpeta Abierta"
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                _safTreeName.value = name
+            }
+
+            val expanded = _expandedFolders.value
+            val fileList = mutableListOf<com.example.data.WorkspaceFile>()
+
+            // FIX #1b: Leer árbol de forma iterativa (no recursiva) para evitar stack overflow
+            // en carpetas con muchos niveles de profundidad
+            data class DirEntry(val doc: androidx.documentfile.provider.DocumentFile, val level: Int)
+            val stack = ArrayDeque<DirEntry>()
+            stack.addFirst(DirEntry(rootDoc, -1))
+
+            while (stack.isNotEmpty()) {
+                val (doc, level) = stack.removeFirst()
+                if (level >= 0) {
+                    fileList.add(
+                        com.example.data.WorkspaceFile(
+                            uri = doc.uri.toString(),
+                            name = doc.name ?: "Unknown",
+                            isDirectory = doc.isDirectory,
+                            level = level
+                        )
+                    )
+                }
+                if (doc.isDirectory && (level < 0 || expanded.contains(doc.uri.toString()))) {
+                    // Ordenar: carpetas primero, luego archivos, ambos por nombre
+                    val children = doc.listFiles()
+                        .sortedWith(compareBy({ !it.isDirectory }, { it.name?.lowercase() ?: "" }))
+                    // Añadir en orden inverso al stack para que salgan en orden correcto
+                    for (child in children.reversed()) {
+                        stack.addFirst(DirEntry(child, level + 1))
+                    }
+                }
+            }
+
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                _safFiles.value = fileList
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // Mantener compatibilidad con llamadas desde context
+    fun setSafTreeUri(uri: android.net.Uri) = setSafTreeUri(uri, context)
 
     fun openFileInTab(file: com.example.data.WorkspaceFile) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -272,10 +282,10 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                         )
                         repository.getFileById(newId)!!
                     }
-                    viewModelScope.launch(Dispatchers.Main) { openFileInTab(finalFile) }
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { openFileInTab(finalFile) }
                 } catch (e: Exception) { e.printStackTrace() }
             } else {
-                viewModelScope.launch(Dispatchers.Main) { selectTab(existing) }
+                kotlinx.coroutines.withContext(Dispatchers.Main) { selectTab(existing) }
             }
         }
     }
@@ -295,7 +305,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         if (prevActive != null && prevActive.id != file.id) {
             saveFileImmediately(prevActive.id, _editorText.value)
         }
-
         _activeFile.value = file
         _editorText.value = file.content
         _foldedStartLines.value = emptySet()
@@ -309,7 +318,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         if (index != -1) {
             val closedFile = currentTabs.removeAt(index)
             _openTabs.value = currentTabs
-
             if (_activeFile.value?.id == fileId) {
                 if (currentTabs.isNotEmpty()) {
                     val nextActive = if (index < currentTabs.size) currentTabs[index] else currentTabs.last()
@@ -322,7 +330,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             } else {
                 saveTabsState()
             }
-
             viewModelScope.launch {
                 repository.getFileById(fileId)?.let {
                     if (it.content != closedFile.content) {
@@ -353,21 +360,18 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                             context.contentResolver.openOutputStream(newDoc.uri)
                                 ?.use { it.write(content.toByteArray()) }
                         }
-                        refreshSafSafTree(context)
+                        refreshSafTreeInternal(safRoot)
                     }
                 } catch (e: Exception) { e.printStackTrace() }
             }
         } else {
             viewModelScope.launch(Dispatchers.IO) {
                 val extension = if (name.contains(".")) "" else ".js"
-                val newFile = VirtualFile(
-                    name = "$name$extension",
-                    content = "// Nuevo archivo: ${name}${extension}\n"
-                )
+                val newFile = VirtualFile(name = "$name$extension", content = "// Nuevo archivo: ${name}${extension}\n")
                 val newId = repository.insertFile(newFile)
                 val createdFile = repository.getFileById(newId)
                 if (createdFile != null) {
-                    viewModelScope.launch(Dispatchers.Main) { openFileInTab(createdFile) }
+                    kotlinx.coroutines.withContext(Dispatchers.Main) { openFileInTab(createdFile) }
                 }
             }
         }
@@ -382,7 +386,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                     context, android.net.Uri.parse(uriStr)
                 )
                 if (doc != null && doc.renameTo(newName)) {
-                    refreshSafSafTree(context)
+                    refreshSafTreeInternal(_safTreeUri.value ?: return@launch)
                     repository.allFiles.first().find { it.path == uriStr }?.let { vFile ->
                         repository.updateFile(vFile.copy(name = newName))
                     }
@@ -396,7 +400,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             val file = repository.getFileById(fileId) ?: return@launch
             val updated = file.copy(name = newName)
             repository.updateFile(updated)
-            viewModelScope.launch(Dispatchers.Main) {
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
                 _openTabs.value = _openTabs.value.map { if (it.id == fileId) updated else it }
                 if (_activeFile.value?.id == fileId) _activeFile.value = updated
             }
@@ -410,10 +414,10 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                     context, android.net.Uri.parse(file.uri)
                 )
                 if (doc != null && doc.delete()) {
-                    refreshSafSafTree(context)
+                    refreshSafTreeInternal(_safTreeUri.value ?: return@launch)
                     repository.allFiles.first().find { it.path == file.uri }?.let { vFile ->
                         repository.deleteFile(vFile)
-                        viewModelScope.launch(Dispatchers.Main) { closeTab(vFile.id) }
+                        kotlinx.coroutines.withContext(Dispatchers.Main) { closeTab(vFile.id) }
                     }
                 }
             } catch (e: Exception) { e.printStackTrace() }
@@ -423,7 +427,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     fun deleteFile(file: VirtualFile) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.deleteFile(file)
-            viewModelScope.launch(Dispatchers.Main) { closeTab(file.id) }
+            kotlinx.coroutines.withContext(Dispatchers.Main) { closeTab(file.id) }
         }
     }
 
@@ -457,8 +461,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             updateCursorValues(processedCursor, processedContent)
         }
 
-        // FIX #2: Reducir el delay de guardado a 500ms para reducir el riesgo de pérdida de datos.
-        // El guardado real síncronamente en onCleared() cubre el caso del cierre brusco.
         _activeFile.value?.let { file ->
             saveJob?.cancel()
             saveJob = viewModelScope.launch(Dispatchers.IO) {
@@ -467,7 +469,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             }
         }
 
-        // Background parser con debounce de 150ms (sin cambios)
         parseJob?.cancel()
         parseJob = viewModelScope.launch(Dispatchers.Default) {
             delay(150)
@@ -476,14 +477,12 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             _diagnostics.value = result.diagnostics
             _symbols.value = result.symbols
             _foldableRanges.value = result.foldableRanges
-
             if (_searchQuery.value.isNotEmpty()) {
                 calculateSearchResults(processedContent, _searchQuery.value)
             }
         }
     }
 
-    // FIX #3: Lógica de persistencia extraída a función reutilizable
     private suspend fun persistContent(file: VirtualFile, content: String) {
         try {
             repository.updateFile(file.copy(content = content))
@@ -493,9 +492,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
                     it.write(content.toByteArray())
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     fun updateCursor(index: Int) {
@@ -513,18 +510,14 @@ class EditorViewModel(private val repository: FileRepository, private val contex
 
     private fun saveFileImmediately(id: Long, content: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.getFileById(id)?.let { file ->
-                persistContent(file, content)
-            }
+            repository.getFileById(id)?.let { file -> persistContent(file, content) }
         }
     }
 
     fun formatCurrentCode() {
         val raw = _editorText.value
         val formatted = PluginManager.formatCode(raw)
-        if (formatted != raw) {
-            onEditorTextChanged(formatted, triggerCursorUpdate = true)
-        }
+        if (formatted != raw) onEditorTextChanged(formatted, triggerCursorUpdate = true)
     }
 
     fun applyQuickFix(fix: QuickFixAction) {
@@ -534,7 +527,6 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             val left = originalText.substring(0, range.first)
             val right = originalText.substring(range.first + fix.replacementText.length)
             val replacedText = left + fix.replacementText + right
-
             val linesOffset = originalText.split("\n")
             var newOffset = 0
             for (i in 0 until fix.lineToReplace) {
@@ -564,10 +556,8 @@ class EditorViewModel(private val repository: FileRepository, private val contex
         if (!_isSearchOpen.value) {
             _searchResults.value = emptyList()
             _searchFocusedIndex.value = -1
-        } else {
-            if (_searchQuery.value.isNotEmpty()) {
-                calculateSearchResults(_editorText.value, _searchQuery.value)
-            }
+        } else if (_searchQuery.value.isNotEmpty()) {
+            calculateSearchResults(_editorText.value, _searchQuery.value)
         }
     }
 
@@ -579,11 +569,7 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     fun updateReplaceQuery(query: String) { _replaceQuery.value = query }
 
     private fun calculateSearchResults(text: String, query: String) {
-        if (query.isEmpty()) {
-            _searchResults.value = emptyList()
-            _searchFocusedIndex.value = -1
-            return
-        }
+        if (query.isEmpty()) { _searchResults.value = emptyList(); _searchFocusedIndex.value = -1; return }
         val list = ArrayList<IntRange>()
         var foundIdx = text.indexOf(query, 0, ignoreCase = true)
         while (foundIdx != -1) {
@@ -591,17 +577,12 @@ class EditorViewModel(private val repository: FileRepository, private val contex
             foundIdx = text.indexOf(query, foundIdx + query.length, ignoreCase = true)
         }
         _searchResults.value = list
-        if (list.isNotEmpty()) {
-            _searchFocusedIndex.value = 0
-            _cursorPosition.value = list[0].first
-        } else {
-            _searchFocusedIndex.value = -1
-        }
+        if (list.isNotEmpty()) { _searchFocusedIndex.value = 0; _cursorPosition.value = list[0].first }
+        else _searchFocusedIndex.value = -1
     }
 
     fun nextSearchResult() {
-        val results = _searchResults.value
-        if (results.isEmpty()) return
+        val results = _searchResults.value; if (results.isEmpty()) return
         val nextIndex = (_searchFocusedIndex.value + 1) % results.size
         _searchFocusedIndex.value = nextIndex
         _cursorPosition.value = results[nextIndex].first
@@ -609,86 +590,44 @@ class EditorViewModel(private val repository: FileRepository, private val contex
     }
 
     fun prevSearchResult() {
-        val results = _searchResults.value
-        if (results.isEmpty()) return
-        val prevIndex = if (_searchFocusedIndex.value - 1 < 0) results.size - 1
-                        else _searchFocusedIndex.value - 1
+        val results = _searchResults.value; if (results.isEmpty()) return
+        val prevIndex = if (_searchFocusedIndex.value - 1 < 0) results.size - 1 else _searchFocusedIndex.value - 1
         _searchFocusedIndex.value = prevIndex
         _cursorPosition.value = results[prevIndex].first
         updateCursorValues(results[prevIndex].first, _editorText.value)
     }
 
     fun replaceCurrent() {
-        val matches = _searchResults.value
-        val activeIdx = _searchFocusedIndex.value
+        val matches = _searchResults.value; val activeIdx = _searchFocusedIndex.value
         if (matches.isEmpty() || activeIdx !in matches.indices) return
-        val range = matches[activeIdx]
-        val text = _editorText.value
-        val newText = text.substring(0, range.first) + _replaceQuery.value + text.substring(range.last + 1)
-        onEditorTextChanged(newText)
+        val range = matches[activeIdx]; val text = _editorText.value
+        onEditorTextChanged(text.substring(0, range.first) + _replaceQuery.value + text.substring(range.last + 1))
     }
 
     fun replaceAll() {
-        val matches = _searchResults.value
-        if (matches.isEmpty()) return
-        val newText = _editorText.value.replace(_searchQuery.value, _replaceQuery.value, ignoreCase = true)
-        onEditorTextChanged(newText)
+        val matches = _searchResults.value; if (matches.isEmpty()) return
+        onEditorTextChanged(_editorText.value.replace(_searchQuery.value, _replaceQuery.value, ignoreCase = true))
     }
 
     fun toggleSidebar() { _isSidebarOpen.value = !_isSidebarOpen.value }
+    fun setSidebarTab(tab: String) { _activeSidebarTab.value = tab; _isSidebarOpen.value = true }
 
-    fun setSidebarTab(tab: String) {
-        _activeSidebarTab.value = tab
-        _isSidebarOpen.value = true
-    }
-
-    fun toggleTheme() {
-        val newVal = !_themeIsDark.value
-        _themeIsDark.value = newVal
-        prefs.edit().putBoolean("themeIsDark", newVal).apply()
-    }
-
-    fun toggleMinimap() {
-        val newVal = !_isMinimapOpen.value
-        _isMinimapOpen.value = newVal
-        prefs.edit().putBoolean("isMinimapOpen", newVal).apply()
-    }
-
-    fun toggleMinimapTextVisibility() {
-        val newVal = !_isMinimapTextVisible.value
-        _isMinimapTextVisible.value = newVal
-        prefs.edit().putBoolean("isMinimapTextVisible", newVal).apply()
-    }
-
-    fun toggleIndentGuides() {
-        val newVal = !_isIndentGuidesEnabled.value
-        _isIndentGuidesEnabled.value = newVal
-        prefs.edit().putBoolean("isIndentGuidesEnabled", newVal).apply()
-    }
-
-    fun setEditorFontSize(size: Float) {
-        _editorFontSize.value = size
-        prefs.edit().putFloat("editorFontSize", size).apply()
-    }
-
+    fun toggleTheme() { val nv = !_themeIsDark.value; _themeIsDark.value = nv; prefs.edit().putBoolean("themeIsDark", nv).apply() }
+    fun toggleMinimap() { val nv = !_isMinimapOpen.value; _isMinimapOpen.value = nv; prefs.edit().putBoolean("isMinimapOpen", nv).apply() }
+    fun toggleMinimapTextVisibility() { val nv = !_isMinimapTextVisible.value; _isMinimapTextVisible.value = nv; prefs.edit().putBoolean("isMinimapTextVisible", nv).apply() }
+    fun toggleIndentGuides() { val nv = !_isIndentGuidesEnabled.value; _isIndentGuidesEnabled.value = nv; prefs.edit().putBoolean("isIndentGuidesEnabled", nv).apply() }
+    fun setEditorFontSize(size: Float) { _editorFontSize.value = size; prefs.edit().putFloat("editorFontSize", size).apply() }
     fun togglePlugin(id: String) { PluginManager.togglePlugin(id) }
 
-    // FIX #4: onCleared guarda síncronamente antes de destruir el ViewModel.
-    // El saveJob usa delay(500ms), así que si la app se cierra durante ese delay
-    // el job se cancela y los cambios se pierden. runBlocking aquí garantiza que
-    // el último estado siempre llega a disco, independientemente del timing del cierre.
+    // FIX #3: Guardar síncronamente al destruir el ViewModel
     override fun onCleared() {
         parseJob?.cancel()
         saveJob?.cancel()
-
         val file = _activeFile.value
         val content = _editorText.value
         if (file != null && content.isNotEmpty()) {
-            runBlocking(Dispatchers.IO) {
-                persistContent(file, content)
-            }
+            runBlocking(Dispatchers.IO) { persistContent(file, content) }
         }
-
         super.onCleared()
     }
 }

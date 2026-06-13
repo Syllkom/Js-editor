@@ -50,58 +50,71 @@ class JsThemeColors(
 ) {
     companion object {
         val VSCODE_DARK = JsThemeColors(
-            comment = Color(0xFF6A9955),        // Muted Green
-            string = Color(0xFFCE9178),         // Salmon Pink
-            number = Color(0xFFB5CEA8),         // Light Green-Yellow
-            keywordControl = Color(0xFFC586C0), // Purple-Magenta
-            keywordDecl = Color(0xFF569CD6),    // Light Blue
-            builtin = Color(0xFF4FC1FF),        // Deep Sky Blue
-            functionName = Color(0xFFDCDCAA),   // Golden Yellow
-            className = Color(0xFF4EC9B0),      // Teal Green
-            operator = Color(0xFFD4D4D4),       // White-Grey
-            identifier = Color(0xFF9CDCFE),     // Light Blue-Grey
-            text = Color(0xFFD4D4D4),           // Soft White
-            background = Color(0xFF1E1E1E),     // Classic VS Code Dark
-            braceCurly = Color(0xFFFFA500),     // Orange
-            braceSquare = Color(0xFFE06C75),    // Purple-Red
-            braceParen = Color(0xFFE5C07B)      // Yellow
+            comment = Color(0xFF6A9955),
+            string = Color(0xFFCE9178),
+            number = Color(0xFFB5CEA8),
+            keywordControl = Color(0xFFC586C0),
+            keywordDecl = Color(0xFF569CD6),
+            builtin = Color(0xFF4FC1FF),
+            functionName = Color(0xFFDCDCAA),
+            className = Color(0xFF4EC9B0),
+            operator = Color(0xFFD4D4D4),
+            identifier = Color(0xFF9CDCFE),
+            text = Color(0xFFD4D4D4),
+            background = Color(0xFF1E1E1E),
+            braceCurly = Color(0xFFFFA500),
+            braceSquare = Color(0xFFE06C75),
+            braceParen = Color(0xFFE5C07B)
         )
 
         val VSCODE_LIGHT = JsThemeColors(
-            comment = Color(0xFF008000),        // Dark Green
-            string = Color(0xFFA31515),         // Deep Red
-            number = Color(0xFF098658),         // Emerald Green
-            keywordControl = Color(0xFFAF00DB), // Purple
-            keywordDecl = Color(0xFF0000FF),    // Blue
-            builtin = Color(0xFF267F99),        // Cyan
-            functionName = Color(0xFF795E26),   // Brown-Gold
-            className = Color(0xFF267F99),      // Teal
-            operator = Color(0xFF333333),       // Charcoal
-            identifier = Color(0xFF001080),     // Dark Navy
-            text = Color(0xFF333333),           // Soft Black
-            background = Color(0xFFF3F3F3),     // Light Slate Grey
-            braceCurly = Color(0xFFA05A00),     // Dark Orange
-            braceSquare = Color(0xFF982531),    // Dark Purple-Red
-            braceParen = Color(0xFF7A6836)      // Dark Yellow
+            comment = Color(0xFF008000),
+            string = Color(0xFFA31515),
+            number = Color(0xFF098658),
+            keywordControl = Color(0xFFAF00DB),
+            keywordDecl = Color(0xFF0000FF),
+            builtin = Color(0xFF267F99),
+            functionName = Color(0xFF795E26),
+            className = Color(0xFF267F99),
+            operator = Color(0xFF333333),
+            identifier = Color(0xFF001080),
+            text = Color(0xFF333333),
+            background = Color(0xFFF3F3F3),
+            braceCurly = Color(0xFFA05A00),
+            braceSquare = Color(0xFF982531),
+            braceParen = Color(0xFF7A6836)
         )
     }
 }
 
 class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnostic> = emptyList()) : VisualTransformation {
-    
+
     var cursorPosition: Int = -1
-    
+
     val colors = if (isDark) JsThemeColors.VSCODE_DARK else JsThemeColors.VSCODE_LIGHT
 
-    // Keywords patterns
+    // FIX #1: Keywords como sets para O(1) lookup — sin cambios, ya era correcto
     private val ctrlKeywords = setOf("if", "else", "return", "for", "while", "do", "switch", "case", "break", "continue", "try", "catch", "finally", "throw", "async", "await", "yield")
     private val declKeywords = setOf("function", "class", "const", "let", "var", "import", "export", "from", "default", "new", "this", "super", "extends", "typeof", "instanceof", "in", "of")
     private val builtins = setOf("console", "window", "document", "process", "Math", "JSON", "Promise", "Object", "Array", "String", "Number", "Boolean", "fetch", "setTimeout", "setInterval")
 
+    companion object {
+        // FIX #2: Regex compiladas UNA SOLA VEZ como constantes del companion object.
+        // Antes se compilaban dentro del loop tokenize() con cada carácter → O(n) compilaciones.
+        private val NUMBER_REGEX = Regex("^[0-9]+(\\.[0-9]+)?\\b")
+        private val WORD_REGEX = Regex("^[a-zA-Z_\$][a-zA-Z0-9_\$]*\\b")
+        private val COLOR_REGEX = Regex(
+            "(#[0-9a-fA-F]{3,8})|(rgba?\\([\\d\\s,.]+\\))",
+            RegexOption.IGNORE_CASE
+        )
+
+        // FIX #3: Chars de operadores como set para lookup O(1) en lugar de String.contains()
+        private val OPERATOR_CHARS = setOf('+', '-', '*', '/', '%', '=', '&', '|', '^', '!', '~', '?', ':', ';', '.', ',', '<', '>', '@')
+    }
+
     fun highlight(text: String): AnnotatedString {
         val builder = AnnotatedString.Builder(text)
-        
-        // Match expressions in sequence
+
         val tokens = tokenize(text)
         for (token in tokens) {
             val style = when (token.type) {
@@ -120,7 +133,7 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                     val parsedColor = try {
                         Color(android.graphics.Color.parseColor(hexColorString))
                     } catch (e: Exception) {
-                        colors.string // fallback
+                        colors.string
                     }
                     SpanStyle(
                         color = if (parsedColor.luminance() > 0.5f) Color.Black else Color.White,
@@ -135,7 +148,7 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
             builder.addStyle(style, token.range.start, token.range.endInclusive + 1)
         }
 
-        // Apply Diagnostics squiggly lines
+        // Diagnostics squiggly underlines
         if (diagnostics.isNotEmpty()) {
             val lines = text.split("\n")
             var currentIndex = 0
@@ -144,11 +157,10 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                 val lineDiags = diagnostics.filter { it.line == line1Idx }
                 for (diag in lineDiags) {
                     val errorColor = if (diag.level == DiagnosticLevel.ERROR) Color(0xFFFF5555) else Color(0xFFFFAA00)
-                    
-                    // Simple full-line underline if term is empty or not found, else find term
+
                     var startOffset = currentIndex
                     var endOffset = currentIndex + lineStr.length
-                    
+
                     if (diag.term.isNotEmpty()) {
                         val termIdx = lineStr.indexOf(diag.term)
                         if (termIdx != -1) {
@@ -163,13 +175,12 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                         endOffset
                     )
                 }
-                currentIndex += lineStr.length + 1 // +1 for '\n'
+                currentIndex += lineStr.length + 1
             }
         }
 
-        // Apply Hex and RGB Color Highlight
-        val rxColor = "(#[0-9a-fA-F]{3,8})|(rgba?\\([\\d\\s,]+\\))".toRegex(RegexOption.IGNORE_CASE)
-        rxColor.findAll(text).forEach { match ->
+        // FIX #4: Reutilizar la misma COLOR_REGEX del companion en lugar de compilarla aquí
+        COLOR_REGEX.findAll(text).forEach { match ->
             val colorStr = match.value.replace(" ", "")
             val parsedColor = try {
                 if (colorStr.startsWith("#")) {
@@ -205,7 +216,7 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                 background = if (isDark) Color(0xFF444444) else Color(0xFFDDDDDD),
                 fontWeight = FontWeight.Bold
             )
-            
+
             fun getBracketAt(pos: Int): Char? {
                 if (pos < 0 || pos >= text.length) return null
                 val c = text[pos]
@@ -217,7 +228,8 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                     }
                     if (matchIndex >= 0) {
                         val tType = tokens[matchIndex].type
-                        if (tType == TokenType.OPERATOR || tType == TokenType.BRACE_CURLY || tType == TokenType.BRACE_SQUARE || tType == TokenType.BRACE_PAREN) {
+                        if (tType == TokenType.OPERATOR || tType == TokenType.BRACE_CURLY ||
+                            tType == TokenType.BRACE_SQUARE || tType == TokenType.BRACE_PAREN) {
                             return c
                         }
                     }
@@ -225,21 +237,16 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                 return null
             }
 
-            var startHighlight = -1
-            var endHighlight = -1
-
             val pairs = mapOf('(' to ')', '{' to '}', '[' to ']', ')' to '(', '}' to '{', ']' to '[')
-            
+
             var matchTargetPos = -1
             var matchChar: Char? = null
 
-            // Check right of cursor
             val rightChar = getBracketAt(cursorPosition)
             if (rightChar != null) {
                 matchTargetPos = cursorPosition
                 matchChar = rightChar
             } else if (cursorPosition > 0) {
-                // Check left of cursor
                 val leftChar = getBracketAt(cursorPosition - 1)
                 if (leftChar != null) {
                     matchTargetPos = cursorPosition - 1
@@ -253,28 +260,22 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
                 val step = if (isForward) 1 else -1
                 var curr = matchTargetPos + step
                 var count = 1
-                
+
                 while (curr >= 0 && curr < text.length) {
                     val c = getBracketAt(curr)
                     if (c != null) {
-                        if (c == matchChar) {
-                            count++
-                        } else if (c == target) {
+                        if (c == matchChar) count++
+                        else if (c == target) {
                             count--
                             if (count == 0) {
-                                startHighlight = matchTargetPos
-                                endHighlight = curr
+                                builder.addStyle(bracketStyle, matchTargetPos, matchTargetPos + 1)
+                                builder.addStyle(bracketStyle, curr, curr + 1)
                                 break
                             }
                         }
                     }
                     curr += step
                 }
-            }
-
-            if (startHighlight != -1 && endHighlight != -1) {
-                builder.addStyle(bracketStyle, startHighlight, startHighlight + 1)
-                builder.addStyle(bracketStyle, endHighlight, endHighlight + 1)
             }
         }
 
@@ -286,101 +287,116 @@ class JsSyntaxHighlighter(val isDark: Boolean, val diagnostics: List<JsDiagnosti
     }
 
     fun tokenize(text: String): List<Token> {
-        val tokens = ArrayList<Token>()
+        val tokens = ArrayList<Token>(text.length / 5)
         var index = 0
         val length = text.length
 
         while (index < length) {
-            val remaining = text.substring(index)
+            val c = text[index]
+            // FIX #5: Peek siguiente char sin crear substring
+            val c1 = if (index + 1 < length) text[index + 1] else '\u0000'
 
-            // 1. Comments
-            if (remaining.startsWith("//")) {
-                val endOfLine = remaining.indexOf('\n')
-                val commentLen = if (endOfLine == -1) remaining.length else endOfLine
-                tokens.add(Token(TokenType.COMMENT, index until (index + commentLen)))
-                index += commentLen
-                continue
-            }
-            
-            if (remaining.startsWith("/*")) {
-                val endOfBlock = remaining.indexOf("*/")
-                val commentLen = if (endOfBlock == -1) remaining.length else endOfBlock + 2
-                tokens.add(Token(TokenType.COMMENT, index until (index + commentLen)))
-                index += commentLen
+            // 1. Comentarios de línea: //
+            if (c == '/' && c1 == '/') {
+                val end = text.indexOf('\n', index + 2).let { if (it == -1) length else it }
+                tokens.add(Token(TokenType.COMMENT, index until end))
+                index = end
                 continue
             }
 
-            // 2. Strings (handles single quotes, double quotes, and template literals backticks)
-            val firstChar = remaining[0]
-            if (firstChar == '\'' || firstChar == '"' || firstChar == '`') {
-                var stringLen = 1
+            // 2. Comentarios de bloque: /* ... */
+            if (c == '/' && c1 == '*') {
+                val closeIdx = text.indexOf("*/", index + 2)
+                val end = if (closeIdx == -1) length else closeIdx + 2
+                tokens.add(Token(TokenType.COMMENT, index until end))
+                index = end
+                continue
+            }
+
+            // 3. Strings: ', ", `
+            if (c == '\'' || c == '"' || c == '`') {
+                var i = index + 1
                 var escaped = false
-                while (stringLen < remaining.length) {
-                    val c = remaining[stringLen]
-                    if (escaped) {
-                        escaped = false
-                    } else if (c == '\\') {
-                        escaped = true
-                    } else if (c == firstChar) {
-                        stringLen++
-                        break
+                while (i < length) {
+                    val sc = text[i]
+                    when {
+                        escaped -> escaped = false
+                        sc == '\\' -> escaped = true
+                        sc == c -> { i++; break }
                     }
-                    stringLen++
+                    i++
                 }
-                tokens.add(Token(TokenType.STRING, index until (index + stringLen)))
-                index += stringLen
+                tokens.add(Token(TokenType.STRING, index until i))
+                index = i
                 continue
             }
 
-            // 3. Numbers
-            val numberMatch = "^[0-9]+(\\.[0-9]+)?\\b".toRegex().find(remaining)
-            if (numberMatch != null) {
-                val numLen = numberMatch.value.length
-                tokens.add(Token(TokenType.NUMBER, index until (index + numLen)))
-                index += numLen
-                continue
+            // 4. Números: dígito inicial
+            if (c.isDigit()) {
+                // FIX #6: Usar NUMBER_REGEX del companion (compilada una sola vez)
+                // y pasarle el substring solo cuando hay un dígito — que es infrecuente
+                val sub = text.substring(index)
+                val m = NUMBER_REGEX.find(sub)
+                if (m != null) {
+                    val end = index + m.value.length
+                    tokens.add(Token(TokenType.NUMBER, index until end))
+                    index = end
+                    continue
+                }
             }
 
-            // 4. Identifier / Keyword / Builtin / Function definition
-            val wordMatch = "^[a-zA-Z_\$][a-zA-Z0-9_\$]*\\b".toRegex().find(remaining)
-            if (wordMatch != null) {
-                val word = wordMatch.value
-                val wordLen = word.length
-                val range = index until (index + wordLen)
+            // 5. Identificadores, keywords, builtins, funciones, clases
+            if (c.isLetter() || c == '_' || c == '$') {
+                // FIX #7: WORD_REGEX del companion, substring solo para letras — mucho menos frecuente que antes
+                val sub = text.substring(index)
+                val m = WORD_REGEX.find(sub) ?: run {
+                    tokens.add(Token(TokenType.TEXT, index..index))
+                    index++
+                    continue
+                }
+                val word = m.value
+                val wordEnd = index + word.length
 
                 val type = when {
                     ctrlKeywords.contains(word) -> TokenType.KEYWORD_CONTROL
                     declKeywords.contains(word) -> TokenType.KEYWORD_DECL
                     builtins.contains(word) -> TokenType.BUILTIN
-                    // Standard PascalCase denotes class names
-                    word[0].isUpperCase() && !builtins.contains(word) -> TokenType.CLASS_NAME
-                    // Peek ahead to see if followed by (
-                    index + wordLen < length && text.substring(index + wordLen).trimStart().startsWith("(") -> TokenType.FUNCTION_NAME
-                    else -> TokenType.IDENTIFIER
+                    word[0].isUpperCase() -> TokenType.CLASS_NAME
+                    // FIX #8: Peek directo en el String original sin substring
+                    else -> {
+                        var peek = wordEnd
+                        while (peek < length && text[peek] == ' ') peek++
+                        if (peek < length && text[peek] == '(') TokenType.FUNCTION_NAME
+                        else TokenType.IDENTIFIER
+                    }
                 }
 
-                tokens.add(Token(type, range))
-                index += wordLen
+                tokens.add(Token(type, index until wordEnd))
+                index = wordEnd
                 continue
             }
 
-            // 5. Operators & Brackets
-            val opChar = remaining[0]
-            val type = when (opChar) {
+            // 6. Brackets
+            val bracketType = when (c) {
                 '{', '}' -> TokenType.BRACE_CURLY
                 '[', ']' -> TokenType.BRACE_SQUARE
                 '(', ')' -> TokenType.BRACE_PAREN
-                else -> {
-                    if ("+-*/%=&|^!~?:;.,".contains(opChar)) TokenType.OPERATOR else TokenType.TEXT
-                }
+                else -> null
             }
-            if (type != TokenType.TEXT || "{}[]()+-*/%=&|^!~?:;.,".contains(opChar)) {
-                tokens.add(Token(if (type == TokenType.TEXT) TokenType.OPERATOR else type, index..index))
+            if (bracketType != null) {
+                tokens.add(Token(bracketType, index..index))
                 index++
                 continue
             }
 
-            // fallback default character
+            // 7. Operadores
+            if (c in OPERATOR_CHARS) {
+                tokens.add(Token(TokenType.OPERATOR, index..index))
+                index++
+                continue
+            }
+
+            // 8. Fallback (espacios, saltos de línea, etc.)
             tokens.add(Token(TokenType.TEXT, index..index))
             index++
         }

@@ -378,18 +378,16 @@ fun ExplorerTabContent(viewModel: EditorViewModel, isDark: Boolean) {
                                 // FIX #5: getFolderIcon ahora devuelve el icono open correcto para cada tipo
                                 val folderSvg = getFolderIcon(file.name, isExpanded)
                                 AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data("file:///android_asset/svg_icons/folders/$folderSvg")
-                                        .error(
-                                           ImageRequest.Builder(context)
-                                             .data("file:///android_asset/svg_icons/folders/${if (isExpanded) "folder-open.svg" else "folder.svg"}")
-                                             .build()  // ✅ Pass the complete ImageRequest
-                                        )
-                                       .build(),
-                                    contentDescription = "Carpeta",
-                                    imageLoader = imageLoader,
-                                    modifier = Modifier.size(20.dp)
-                                )
+    model = ImageRequest.Builder(context)
+        .data("file:///android_asset/svg_icons/folders/$folderSvg")
+        .error(ImageRequest.Builder(context)
+            .data("file:///android_asset/svg_icons/folders/${if (isExpanded) "folder-open.svg" else "folder.svg"}")
+            .build())
+        .build(),
+    contentDescription = "Carpeta",
+    imageLoader = imageLoader,
+    modifier = Modifier.size(20.dp)
+)
                             } else {
                                 val ext = file.name.substringAfterLast('.', "")
                                 val svgName = when (ext) {
